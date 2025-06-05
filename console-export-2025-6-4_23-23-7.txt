@@ -1,0 +1,100 @@
+Content-Security-Policy warnings 6
+Navigation API not supported, loading polyfill shell-f547a73c.js:1:204695
+Navigation listeners online shell-f547a73c.js:1:204975
+Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at https://w3-reporting.reddit.com/policy. (Reason: CORS request did not succeed). Status code: (null).
+Content-Security-Policy warnings 4
+Ignoring unsupported entryTypes: longtask. recaptcha__en.js:405:341
+[SincUpscale] Replacing image: 
+<img class="mb-0 shreddit-subreddit-…ckground  w-full h-full" src="https://styles.redditmed…e032b08d469b254c268bd79f" alt="r/fo4 icon" width="48" style="width: 48px;" loading="lazy" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="min-h-full object-contai…n max-h-full max-w-full" alt="r/fo4 - MARCY LON Pipe P…Shirt and J A TAKE EIRA" loading="lazy" src="https://i.redd.it/rjxjulklt24f1.jpeg" data-sinc-upscaled="true">
+content.js:155:12
+Found a sectioned h1 element with no specified font-size or margin properties. More information: https://developer.mozilla.org/docs/Web/HTML/Element/Heading_Elements#specifying_a_uniform_font_size_for_h1 content.js:6:26
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…fa1ee9f3be8265049428cc92" alt="u/gaming-is-my-job avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…998268065d12aec285c7c19d" alt="u/Greedy-Swing-4876 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/I_dont_sprint avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_2.png" alt="u/Exotic_Chemical3358 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_6.png" alt="u/StranglePants avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_2.png" alt="u/ayyoogunsofboom avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/VeggieCarbonara avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…4d770c88c417a064b3ac6654" alt="u/Mogui- avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_5.png" alt="u/RedviperWangchen avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/ninaskywalker avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_5.png" alt="u/Altruistic_Truck2421 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…22e700c13853b0b6e6ff4081" alt="u/Miserable-Ad-7952 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/LoonaFan101 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/DarkArc76 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_3.png" alt="u/bigsamson4_2 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/Disastrous-Fox8505 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_3.png" alt="u/Nakidka avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_2.png" alt="u/PosMatic avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…5ba702a7e5f96e40295438f8" alt="u/D-1498 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/TheHairyGumball avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/mathteachinggamer avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…a322c88a2c91ece9e5637c56" alt="u/One_Ugly_Rat avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/SpecialAd4085 avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="max-w-full" src="https://www.redditstatic…/v2/avatar_default_0.png" alt="u/DeadP00lMaybe avatar" data-sinc-upscaled="true">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img class="h-full w-full" src="https://styles.redditmed…b53485e218ca6c2f4cf7269b" alt="u/Starchaser_WoF avatar" data-sinc-upscaled="true">
+content.js:155:12
+Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at https://www.redditstatic.com/shreddit/sentry-bc0d3b33.js. (Reason: CORS request did not succeed). Status code: (null).
+Module source URI is not allowed in this document: “https://www.redditstatic.com/shreddit/sentry-bc0d3b33.js”. marcy_died_during_the_fight_against_the
+Uncaught (in promise) TypeError: error loading dynamically imported module: https://www.redditstatic.com/shreddit/sentry-bc0d3b33.js
+[SincUpscale] Replacing image: 
+<img class="absolute top-1/2 -transl…background-image-filter" alt="" role="presentation" loading="eager" fetchpriority="high" src="https://preview.redd.it/…7c25856037274f2372b0e64a" srcset="https://preview.redd.it/…332d7c3aaf7ccb315b 1080w" sizes="(min-width: 1415px) 750p…dth: 768px) 50vw, 100vw" data-sinc-upscaled="true" style="display: none;">
+content.js:155:12
+[SincUpscale] Replacing image: 
+<img id="post-image" class="i18n-post-media-img prev…object-contain relative" alt="r/fo4 - MARCY LON Pipe P…Shirt and J A TAKE EIRA" loading="eager" fetchpriority="high" src="https://preview.redd.it/…7c25856037274f2372b0e64a" srcset="https://preview.redd.it/…332d7c3aaf7ccb315b 1080w" sizes="(min-width: 1415px) 750p…dth: 768px) 50vw, 100vw" data-sinc-upscaled="true" style="display: none;">
+content.js:155:12
+WebGL warning: tex(Sub)Image[23]D: Cross-origin elements require CORS.
+SecurityError: The operation is insecure. 2 content.js:134
+WebGL warning: tex(Sub)Image[23]D: Cross-origin elements require CORS.
