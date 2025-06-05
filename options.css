@@ -1,0 +1,22 @@
+/*! SmartUpscale by Marat Tanalin | http://tanalin.com */
+
+* {font-family: Tahoma, Arial, sans-serif; margin: 0; }
+BODY {font-size: .875em; padding: 0; user-select: none; }
+
+FORM {opacity: 0; transition: opacity .1s ease-in-out; }
+FORM[_inited] {opacity: 1; }
+
+LABEL[_disabled] {opacity: .35; }
+
+DL {margin: 1em 0; }
+
+DL.text {display: flex; }
+DL.text > DT > LABEL {display: block; padding-right: .35em; }
+DL.text > DD > INPUT {margin: 0; }
+
+DL.checkbox {display: flex; flex-direction: row-reverse; justify-content: flex-end; }
+DL.checkbox > DT > LABEL {display: block; padding-left: .35em; }
+DL.checkbox > DD > INPUT {margin: 0; }
+
+UL.submit {display: flex; list-style: none; margin: 1.25em 0 0; padding: 0; }
+UL.submit > LI {padding-right: .75em; }
