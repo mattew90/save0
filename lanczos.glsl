@@ -1,0 +1,1 @@
+// Paste the fragment shader code here, as in content.js, and fetch it via AJAX in JS if desired.

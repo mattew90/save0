@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Sinc Upscale",
+  "description": "Replaces upscaled images with WebGL-canvas using sinc (Lanczos) scaling filter. If not possible, attempts integer scaling.",
+  "version": "0.1",
+  "permissions": ["scripting"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
