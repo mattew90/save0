@@ -98,38 +98,6 @@ function copyAllComputedStyles(from, to) {
   }
 }
 
-// --- Caching for cross-origin workaround ---
-const storedImages = {};
-
-async function cacheAndProcess(img) {
-  try {
-    // Only cache if not already done and not a data/blob/local image
-    if (
-      storedImages[img.src] ||
-      img.src.startsWith("data:") ||
-      img.src.startsWith("blob:") ||
-      img.src.startsWith(window.location.origin)
-    ) {
-      return;
-    }
-    const resp = await fetch(img.src, {mode:"cors"});
-    if (!resp.ok) throw new Error("Image fetch failed " + resp.status);
-    const blob = await resp.blob();
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      storedImages[img.src] = reader.result;
-      img.src = reader.result; // Now safe to use!
-      // Process this image again now that it's CORS-safe
-      processImages();
-    };
-    reader.readAsDataURL(blob);
-  } catch (e) {
-    console.warn('Failed to cache image:', img.src, e);
-    // Mark as processed so we do not keep trying
-    img.dataset.sincUpscaled = "failed";
-  }
-}
-
 function getPassthroughShaders(isWebGL2) {
   return {
     vert: isWebGL2 ? `#version 300 es
@@ -178,9 +146,8 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     return;
   }
   if (!isCORSsafe(img)) {
-    // Try to fetch, cache, and retry
-    if (!storedImages[img.src]) {
-      cacheAndProcess(img);
+//    console.log('[SincUpscale] Resorting to old fallback due to CORS:', img.src);
+    if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {
     }
     return;
   }
@@ -459,24 +426,13 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
 // --- Process all <img> elements, process immediately, not throttled ---
 function processImages() {
   for (const img of document.querySelectorAll('img')) {
-    if (img.dataset.sincUpscaled === "true" || img.dataset.sincUpscaled === "failed") continue;
+    if (img.dataset.sincUpscaled === "true") continue;
     if (isSVG(img)) {
       img.dataset.sincUpscaled = "svg";
       continue;
     }
     if (!img.complete || !img.naturalWidth) {
       img.addEventListener('load', processImages, {once: true});
-      continue;
-    }
-    // If image is cross-origin and not CORS-safe, try to cache and convert it first
-    if (
-      !isCORSsafe(img) &&
-      !storedImages[img.src] &&
-      !img.src.startsWith("data:") &&
-      !img.src.startsWith("blob:") &&
-      !img.src.startsWith(window.location.origin)
-    ) {
-      cacheAndProcess(img);
       continue;
     }
     const { scaleX, scaleY, needs, width, height, style } = getScaleInfo(img);
