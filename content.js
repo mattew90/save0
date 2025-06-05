@@ -1,367 +1,166 @@
-/*! SmartUpscale by Marat Tanalin | http://tanalin.com */
+// --- Minimal Sinc/Lanczos Upscaling Extension ---
+// For every <img> on the page, checks if it is upscaled, then replaces it with a canvas using WebGL sinc filter.
 
-const propertyName  = 'image-rendering',
-      styleAttrName = 'style',
-      autoValue     = 'auto',
-      propertyValue = 'pixelated',
-      processDelay  = 500,
-      scrollDelay   = 100;
-
-let androidFactor = 1,
-    android       = false;
-
-let options, observer;
-
-function getRendering(image) {
-	return getComputedStyle(image, null).getPropertyValue(propertyName);
+function needsUpscaling(img) {
+  const style = window.getComputedStyle(img);
+  const width = parseInt(style.width, 10) || img.width;
+  const height = parseInt(style.height, 10) || img.height;
+  return width > img.naturalWidth || height > img.naturalHeight;
 }
 
-function setRendering(image, value) {
-	const style    = image.style;
-	let   oldValue = style.imageRendering;
+// A simple utility to load an image as a texture and run a shader for scaling.
+async function replaceWithSincCanvas(img, radius = 3) {
+  if (!img.complete || !img.naturalWidth) return;
+  const style = window.getComputedStyle(img);
+  const width = parseInt(style.width, 10) || img.width;
+  const height = parseInt(style.height, 10) || img.height;
 
-	if ('' === oldValue) {
-		oldValue = autoValue;
-	}
+  // Create and size the canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.style.display = style.display;
+  canvas.style.width = style.width;
+  canvas.style.height = style.height;
+  canvas.style.objectFit = style.objectFit;
 
-	if (oldValue !== value) {
-		style.imageRendering = value;
+  img.style.display = "none";
+  img.parentNode.insertBefore(canvas, img);
 
-		if (image.getAttribute(styleAttrName) === propertyName + ': ' + autoValue + ';') {
-			image.removeAttribute(styleAttrName);
-		}
-	}
+  // Set up WebGL
+  const gl = canvas.getContext('webgl');
+  if (!gl) {
+    console.warn("WebGL not supported");
+    return;
+  }
+
+  // Vertex shader (simple passthrough)
+  const vertSource = `
+    attribute vec2 aPos;
+    attribute vec2 aTex;
+    varying vec2 vTex;
+    void main() {
+      vTex = aTex;
+      gl_Position = vec4(aPos, 0, 1);
+    }
+  `;
+
+  // Fragment shader (Lanczos-3 filter, simplified)
+  const fragSource = `
+    precision mediump float;
+    varying vec2 vTex;
+    uniform sampler2D uTex;
+    uniform vec2 uSrcSize;
+    uniform vec2 uDstSize;
+    uniform float uRadius;
+
+    float sinc(float x) {
+      if (x == 0.0) return 1.0;
+      float pix = 3.14159265359 * x;
+      return sin(pix) / pix;
+    }
+
+    float lanczos(float x, float a) {
+      x = abs(x);
+      if (x >= a) return 0.0;
+      return sinc(x) * sinc(x / a);
+    }
+
+    void main() {
+      vec2 scale = uSrcSize / uDstSize;
+      vec2 srcCoord = vTex * uDstSize * scale;
+      vec2 center = srcCoord - 0.5;
+
+      vec4 color = vec4(0.0);
+      float total = 0.0;
+      float radius = uRadius;
+
+      for (float dy = -3.0; dy <= 3.0; dy += 1.0) {
+        for (float dx = -3.0; dx <= 3.0; dx += 1.0) {
+          vec2 offset = vec2(dx, dy);
+          vec2 sampleCoord = (center + offset + 0.5) / uSrcSize;
+          float weight = lanczos(dx, radius) * lanczos(dy, radius);
+          color += texture2D(uTex, sampleCoord) * weight;
+          total += weight;
+        }
+      }
+      gl_FragColor = color / total;
+    }
+  `;
+
+  // Compile shaders and create program
+  function compile(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw gl.getShaderInfoLog(s);
+    }
+    return s;
+  }
+  const vs = compile(gl, gl.VERTEX_SHADER, vertSource);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, fragSource);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  // Set up quad
+  const posLoc = gl.getAttribLocation(prog, 'aPos');
+  const texLoc = gl.getAttribLocation(prog, 'aTex');
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  const quad = new Float32Array([
+    -1, -1, 0, 0,
+    1, -1, 1, 0,
+    -1, 1, 0, 1,
+    1, 1, 1, 1,
+  ]);
+  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(texLoc);
+  gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 16, 8);
+
+  // Create and upload texture
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); // Required for NPOT textures
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+
+  // Set uniforms
+  gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
+  gl.uniform2f(gl.getUniformLocation(prog, "uSrcSize"), img.naturalWidth, img.naturalHeight);
+  gl.uniform2f(gl.getUniformLocation(prog, "uDstSize"), width, height);
+  gl.uniform1f(gl.getUniformLocation(prog, "uRadius"), radius);
+
+  // Draw quad
+  gl.viewport(0, 0, width, height);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // Optionally, if you want the original image to remain in DOM, you could overlay instead of replacing.
 }
 
-/* saveRendering(), restoreRendering(). */
-{
-	const map = new WeakMap;
-
-	function saveRendering(image) {
-		if (map.has(image)) {
-			return;
-		}
-
-		map.set(image, getRendering(image));
-	}
-
-	function restoreRendering(image) {
-		if (map.has(image)) {
-			setRendering(image, map.get(image));
-		}
-	}
-}
-/* /saveRendering(), restoreRendering(). */
-
-/* addScrollEndListener() */
-{
-	const listeners = [];
-	let   timeout   = 0;
-
-	const callListener = listener => {
-		listener();
-	};
-
-	const callListeners = () => {
-		listeners.forEach(callListener);
-	};
-
-	const scrollListener = () => {
-		window.clearTimeout(timeout);
-		timeout = window.setTimeout(callListeners, scrollDelay);
-	};
-
-	function addScrollEndListener(listener) {
-		if (0 === listeners.length) {
-			window.addEventListener('scroll', scrollListener);
-		}
-
-		listeners.push(listener);
-	}
-}
-/* /addScrollEndListener() */
-
-function elementInViewport(element) {
-	const rect             = element.getBoundingClientRect(),
-	      scrollingElement = document.scrollingElement,
-	      clientWidth      = scrollingElement.clientWidth,
-	      clientHeight     = scrollingElement.clientHeight;
-
-	// If any of four element corners is in viewport, the element is partially visible.
-	return rect.right > 0 && rect.bottom > 0 && rect.left < clientWidth && rect.top < clientHeight;
+// Helper to process all current and future images
+function processImages() {
+  for (const img of document.querySelectorAll('img')) {
+    if (!img.dataset.sincUpscaled && needsUpscaling(img)) {
+      img.dataset.sincUpscaled = "true";
+	  console.log("[SincUpscale] Replacing image:", img);
+      replaceWithSincCanvas(img, 3);
+    }
+  }
 }
 
-function getFileExtension(path) {
-	var hashPos = path.indexOf('#');
-
-	if (-1 !== hashPos) {
-		path = path.slice(0, hashPos);
-	}
-
-	var qPos = path.indexOf('?');
-
-	if (-1 !== qPos) {
-		path = path.slice(0, qPos);
-	}
-
-	var dotPos = path.lastIndexOf('.');
-
-	return -1 === dotPos ? null : path.slice(dotPos + 1);
-}
-
-function isVector(image) {
-	return 'svg' === getFileExtension(image.src);
-}
-
-function isInteger(number) {
-	return Math.floor(number) === number;
-}
-
-function isPixelRatioReal() {
-	if (!android) {
-		return true;
-	}
-
-	const element = document.querySelector('META[name="viewport"]');
-
-	return element && element.content.includes('width=device-width');
-}
-
-function getImages() {
-	return Array.from(document.querySelectorAll('img, input[type="image"]'));
-}
-
-function getImagesInViewport() {
-	return getImages().filter(elementInViewport);
-}
-
-function getAndroidFactor() {
-	return window.outerWidth / window.innerWidth;
-}
-
-function getPixelRatio() {
-	let ratio = window.devicePixelRatio;
-
-	if (android) {
-		ratio *= getAndroidFactor();
-	}
-
-	return ratio;
-}
-
-function getFloatStyle(computedStyle, propName) {
-	return parseFloat(computedStyle.getPropertyValue(propName));
-}
-
-function getImageSize(elem) {
-	const style = getComputedStyle(elem, null);
-
-	if ('none' === style.getPropertyValue('display')) {
-		return null;
-	}
-
-	let width  = getFloatStyle(style, 'width'),
-	    height = getFloatStyle(style, 'height');
-
-	if ('border-box' === style.getPropertyValue('box-sizing')) {
-		const borderWidth   = getFloatStyle(style, 'border-left-width') + getFloatStyle(style, 'border-right-width'),
-		      borderHeight  = getFloatStyle(style, 'border-top-width')  + getFloatStyle(style, 'border-bottom-width'),
-		      paddingWidth  = getFloatStyle(style, 'padding-left')      + getFloatStyle(style, 'padding-right'),
-		      paddingHeight = getFloatStyle(style, 'padding-top')       + getFloatStyle(style, 'padding-bottom');
-
-		width  -= (borderWidth  + paddingWidth);
-		height -= (borderHeight + paddingHeight);
-	}
-
-	return {
-		width  : width,
-		height : height
-	}
-}
-
-function getImageZoom(image) {
-	if (image.srcset.trim().length && image.src !== image.currentSrc) {
-		return 0;
-	}
-
-	const size = getImageSize(image);
-
-	if (null === size) {
-		return 0;
-	}
-
-	const x = size.width  / image.naturalWidth,
-	      y = size.height / image.naturalHeight;
-
-	if (x !== y) {
-		return 0;
-	}
-
-	let zoom = x * getPixelRatio();
-
-	if (!isInteger(zoom)) {
-		const zoomRounded = Math.round(zoom * 1000) / 1000;
-
-		if (isInteger(zoomRounded)) {
-			zoom = zoomRounded;
-		}
-	}
-
-	return zoom;
-}
-
-function processImageLoadListener(event) {
-	processLoadedImage(event.target);
-}
-
-function processLoadedImage(image) {
-	const zoom = getImageZoom(image);
-
-	if (zoom > 1 && isInteger(zoom) && (0 === options.maxzoom || zoom <= options.maxzoom)) {
-		setRendering(image, propertyValue);
-	}
-	else {
-		restoreRendering(image);
-	}
-
-	if (!options.observe) {
-		image.removeEventListener('load', processImageLoadListener);
-	}
-}
-
-function processImage(image) {
-	if (isVector(image)) {
-		return;
-	}
-
-	saveRendering(image);
-
-	const complete = image.complete;
-
-	if (!complete || options.observe) {
-		image.addEventListener('load', processImageLoadListener);
-	}
-
-	if (complete) {
-		processLoadedImage(image);
-	}
-}
-
-function processImmediately() {
-	getImagesInViewport().forEach(processImage);
-}
-
-/* process() */
-{
-	let lastTime = 0,
-	    timeout  = 0,
-	    waiting  = false;
-
-	function process() {
-		const diff = Date.now() - lastTime;
-
-		if (diff < processDelay) {
-			if (!waiting) {
-				waiting = true;
-
-				window.clearTimeout(timeout);
-
-				timeout = window.setTimeout(() => {
-					waiting = false;
-					process();
-				}, processDelay - diff + 1);
-			}
-		}
-		else {
-			lastTime = Date.now();
-			processImmediately();
-		}
-	}
-}
-/* /process() */
-
-function applyGlobally() {
-	const style = document.createElement('style');
-	style.textContent = '*, :before, :after {' + propertyName + ': ' + propertyValue + ' !important; }';
-	document.head.appendChild(style);
-}
-
-function androidProcess() {
-	const newFactor = getAndroidFactor();
-
-	if (androidFactor === newFactor) {
-		return;
-	}
-
-	androidFactor = newFactor;
-	process();
-}
-
-function initAndroid() {
-	if (!android) {
-		return;
-	}
-
-	document.documentElement.addEventListener('touchend', androidProcess);
-	screen.addEventListener('orientationchange', androidProcess);
-}
-
-function initResize() {
-	window.addEventListener('resize', process);
-}
-
-function initScroll() {
-	addScrollEndListener(process);
-}
-
-function createObserver() {
-	const observer = new MutationObserver(process);
-
-	observer.observe(document, {
-		childList     : true,
-		subtree       : true,
-		attributes    : true,
-		characterData : true
-	});
-
-	return observer;
-}
-
-function initObserver() {
-	if (options.observe) {
-		observer = createObserver();
-	}
-}
-
-function getOs(callback) {
-	browser.runtime.sendMessage(
-		{message: 'getOs'},
-		message => {
-			android = 'android' === message.os;
-			callback();
-		}
-	);
-}
-
-function init(aOptions) {
-	options = aOptions;
-
-	if (options.global) {
-		applyGlobally();
-		return;
-	}
-
-	getOs(() => {
-		if (!isPixelRatioReal()) {
-			return;
-		}
-
-		initAndroid();
-		initResize();
-		initScroll();
-		initObserver();
-		process();
-	});
-}
-
-getOptions(init);
+// Observe DOM for dynamically added images
+const mo = new MutationObserver(processImages);
+mo.observe(document.body, { childList: true, subtree: true });
+window.addEventListener('DOMContentLoaded', processImages);
+window.addEventListener('load', processImages);
+processImages();
