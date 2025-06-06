@@ -1,10 +1,10 @@
 // --- Sinc/Lanczos Resampling Extension with robust Nearest Neighbor Integer Fallback ---
 // WebGL2 when available, sRGB-safe, no double-flip, and no unneeded gamma correction.
+// Images are not upside down, and colors match original unless doing linear math for downsampling!
 
 const propertyName  = 'image-rendering';
 const autoValue     = 'auto';
 const propertyValue = 'pixelated';
-const cachedDataURLs = {};
 
 const renderingMap = new WeakMap();
 function saveRendering(image) {
@@ -24,14 +24,6 @@ function isSVG(img) {
     const src = img.currentSrc || img.src || '';
     return /\.svg(\?|#|$)/i.test(src);
   } catch { return false; }
-}
-
-function isYouTubeThumbnail(img) {
-  const src = img.currentSrc || img.src || '';
-  return (
-    /\/\/i\.ytimg\.com\/vi\//.test(src) ||
-    /\/\/yt3\.ggpht\.com\//.test(src)
-  );
 }
 
 function isInteger(number) {
@@ -57,7 +49,9 @@ function getScaleInfo(img) {
 }
 
 function oldNearestNeighborFallback(img, scaleX, scaleY) {
-  if (isSVG(img)) return false;
+  if (isSVG(img)) {
+    return false;
+  }
   saveRendering(img);
   if (img.srcset && img.srcset.trim().length && img.src !== img.currentSrc) {
     restoreRendering(img);
@@ -85,6 +79,7 @@ function isCORSsafe(img) {
   return img.crossOrigin === "anonymous";
 }
 
+// --- Copy all computed styles except width/height (set separately) ---
 function copyAllComputedStyles(from, to) {
   const computed = window.getComputedStyle(from);
   for (let prop of computed) {
@@ -95,6 +90,7 @@ function copyAllComputedStyles(from, to) {
   }
   to.className = from.className || "";
   to.id = from.id || "";
+  // Copy data attributes
   for (const attr of from.attributes) {
     if (attr.name.startsWith('data-')) {
       to.setAttribute(attr.name, attr.value);
@@ -140,6 +136,21 @@ function getPassthroughShaders(isWebGL2) {
   };
 }
 
+// --- YouTube-optimized image readiness check ---
+function isImageReady(img) {
+  if (!img.complete || !img.naturalWidth || !img.naturalHeight) return false;
+  if (img.naturalWidth <= 8 || img.naturalHeight <= 8) return false;
+  const style = window.getComputedStyle(img);
+  const displayedW = parseFloat(style.width), displayedH = parseFloat(style.height);
+  if (
+    displayedW > img.naturalWidth * 1.5 ||
+    displayedH > img.naturalHeight * 1.5
+  ) return false;
+  return true;
+}
+
+// --- Fetch as blob/dataURL fallback (for CORS) ---
+const cachedDataURLs = {};
 async function fetchAndCacheToDataURL(img) {
   const url = img.src;
   if (cachedDataURLs[url]) {
@@ -163,11 +174,18 @@ async function fetchAndCacheToDataURL(img) {
   }
 }
 
-// --- Sinc/Lanczos resampling and fallback logic ---
+// --- Replace image with canvas, tagging with src for deduplication ---
 async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style = null) {
   if (isSVG(img)) return;
-  if (!img.complete || !img.naturalWidth) {
+  if (!isImageReady(img)) {
+    // Listen for future load or src changes
     img.addEventListener('load', () => replaceWithSincCanvas(img, scaleX, scaleY, width, height, style), { once: true });
+    new MutationObserver((mutations, obs) => {
+      if (isImageReady(img)) {
+        obs.disconnect();
+        replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
+      }
+    }).observe(img, {attributes: true, attributeFilter: ['src', 'srcset']});
     return;
   }
   if (!isCORSsafe(img)) {
@@ -176,310 +194,383 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     if (fetched) {
       img.addEventListener('load', () => replaceWithSincCanvas(img, scaleX, scaleY, width, height, style), { once: true });
     } else {
-      if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {
-        img.style.display = ""; // Show original if all fails
-      }
+      oldNearestNeighborFallback(img, scaleX, scaleY);
     }
     return;
   }
 
   // Create and size the canvas
-  try {
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    style = style || window.getComputedStyle(img);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  style = style || window.getComputedStyle(img);
 
-    copyAllComputedStyles(img, canvas);
-    canvas.style.width = style.width;
-    canvas.style.height = style.height;
+  // Copy all computed styles except width/height, then set those explicitly
+  copyAllComputedStyles(img, canvas);
+  canvas.style.width = style.width;
+  canvas.style.height = style.height;
+  canvas.dataset.sincUpscaled = "true";
+  canvas.dataset.src = img.currentSrc || img.src;
 
-    img.style.display = "none";
-    img.parentNode.insertBefore(canvas, img);
+  img.style.display = "none";
+  img.parentNode.insertBefore(canvas, img);
 
-    // --- WebGL2 context and fallback ---
-    let gl = canvas.getContext('webgl2');
-    const isWebGL2 = !!gl;
-    let hasRenderableRGBA16F = false;
-    let useFloatFbo = false;
-    if (isWebGL2 && gl.getExtension('EXT_color_buffer_float')) {
-      hasRenderableRGBA16F = true;
-    }
+  // --- WebGL2 context and fallback ---
+  let gl = canvas.getContext('webgl2');
+  const isWebGL2 = !!gl;
+  let hasRenderableRGBA16F = false;
+  let useFloatFbo = false;
+  if (isWebGL2 && gl.getExtension('EXT_color_buffer_float')) {
+    hasRenderableRGBA16F = true;
+  }
+  if (!gl) {
+    gl = canvas.getContext('webgl');
     if (!gl) {
-      gl = canvas.getContext('webgl');
-      if (!gl) {
-        throw "[SincUpscale] WebGL not supported.";
-      }
+      console.warn("[SincUpscale] WebGL not supported. Resorting to fallback.", img.src);
+      canvas.remove();
+      img.style.display = "";
+      if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {}
+      return;
     }
+  }
 
-    const srcTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, srcTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  // --- Create source texture from image (always RGBA/UNSIGNED_BYTE for HTMLImageElement) ---
+  const srcTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // --- For WebGL2: render to RGBA16F float framebuffer for max quality, only if supported ---
+  let fbo = null, renderTex = null;
+  if (isWebGL2 && hasRenderableRGBA16F) {
+    renderTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, renderTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.FLOAT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    let fbo = null, renderTex = null;
-    if (isWebGL2 && hasRenderableRGBA16F) {
-      renderTex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, renderTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.FLOAT, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, renderTex, 0);
 
-      fbo = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, renderTex, 0);
-
-      const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-      if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        fbo = null;
-        renderTex = null;
-      } else {
-        useFloatFbo = true;
-      }
-    }
-
-    const isDownsample = (scaleX < 1 && scaleY < 1);
-
-    const vertSource = isWebGL2 ? `#version 300 es
-      in vec2 aPos;
-      in vec2 aTex;
-      out vec2 vTex;
-      void main() {
-        vTex = aTex;
-        gl_Position = vec4(aPos, 0, 1);
-      }
-    ` : `
-      attribute vec2 aPos;
-      attribute vec2 aTex;
-      varying vec2 vTex;
-      void main() {
-        vTex = aTex;
-        gl_Position = vec4(aPos, 0, 1);
-      }
-    `;
-
-    const fragSource = isWebGL2 ? `#version 300 es
-      precision highp float;
-      in vec2 vTex;
-      uniform sampler2D uTex;
-      uniform vec2 uSrcSize, uDstSize;
-      uniform bool uDown;
-      out vec4 fragColor;
-      float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
-      float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
-      void main() {
-        vec2 scale = uSrcSize / uDstSize;
-        vec2 srcCoord = vTex * uDstSize * scale;
-        vec2 center = srcCoord - 0.5;
-        vec4 color = vec4(0.0);
-        float total = 0.0;
-        float r = 3.0;
-        for (int dy = -3; dy <= 3; ++dy) {
-          for (int dx = -3; dx <= 3; ++dx) {
-            vec2 offset = vec2(float(dx), float(dy));
-            vec2 sampleCoord = (center + offset + 0.5) / uSrcSize;
-            vec4 texel = texture(uTex, sampleCoord);
-            if (uDown) {
-              texel.rgb = pow(texel.rgb, vec3(2.2));
-            }
-            float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
-            color += texel * weight;
-            total += weight;
-          }
-        }
-        color /= total;
-        if (uDown) {
-          color.rgb = pow(color.rgb, vec3(1.0/2.2));
-        }
-        fragColor = color;
-      }
-    ` : `
-      precision highp float;
-      varying vec2 vTex;
-      uniform sampler2D uTex;
-      uniform vec2 uSrcSize;
-      uniform vec2 uDstSize;
-      uniform bool uDown;
-      float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
-      float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
-      void main() {
-        vec2 scale = uSrcSize / uDstSize;
-        vec2 srcCoord = vTex * uDstSize * scale;
-        vec2 center = srcCoord - 0.5;
-        vec4 color = vec4(0.0);
-        float total = 0.0;
-        float r = 3.0;
-        for (int dy = -3; dy <= 3; ++dy) {
-          for (int dx = -3; dx <= 3; ++dx) {
-            vec2 offset = vec2(float(dx), float(dy));
-            vec2 sampleCoord = (center + offset + 0.5) / uSrcSize;
-            vec4 texel = texture2D(uTex, sampleCoord);
-            if (uDown) {
-              texel.rgb = pow(texel.rgb, vec3(2.2));
-            }
-            float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
-            color += texel * weight;
-            total += weight;
-          }
-        }
-        color /= total;
-        if (uDown) {
-          color.rgb = pow(color.rgb, vec3(1.0/2.2));
-        }
-        gl_FragColor = color;
-      }
-    `;
-
-    function compile(gl, type, src) {
-      const s = gl.createShader(type);
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-        throw gl.getShaderInfoLog(s);
-      }
-      return s;
-    }
-    let vs, fs, prog;
-    try {
-      vs = compile(gl, gl.VERTEX_SHADER, vertSource);
-      fs = compile(gl, gl.FRAGMENT_SHADER, fragSource);
-      prog = gl.createProgram();
-      gl.attachShader(prog, vs);
-      gl.attachShader(prog, fs);
-      gl.linkProgram(prog);
-      gl.useProgram(prog);
-    } catch (e) {
-      throw "[SincUpscale] Shader compile/link failed.";
-    }
-
-    const posLoc = gl.getAttribLocation(prog, isWebGL2 ? 'aPos' : 'aPos');
-    const texLoc = gl.getAttribLocation(prog, isWebGL2 ? 'aTex' : 'aTex');
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    const quad = new Float32Array([
-      -1, -1, 0, 0,
-       1, -1, 1, 0,
-      -1,  1, 0, 1,
-       1,  1, 1, 1,
-    ]);
-    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
-    gl.enableVertexAttribArray(texLoc);
-    gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 16, 8);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, srcTex);
-
-    gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
-    gl.uniform2f(gl.getUniformLocation(prog, "uSrcSize"), img.naturalWidth, img.naturalHeight);
-    gl.uniform2f(gl.getUniformLocation(prog, "uDstSize"), width, height);
-    if (gl.getUniformLocation(prog, "uDown")) {
-      gl.uniform1i(gl.getUniformLocation(prog, "uDown"), isDownsample ? 1 : 0);
-    }
-
-    if (isWebGL2 && useFloatFbo) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    } else {
+    const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
+      console.warn("[SincUpscale] WebGL2 framebuffer incomplete, falling back to canvas.", fbStatus);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      fbo = null;
+      renderTex = null;
+    } else {
+      useFloatFbo = true;
     }
+  }
+
+  // --- Which workflow: linear (for downsampling only) ---
+  const isDownsample = (scaleX < 1 && scaleY < 1);
+
+  // Vertex shader (WebGL2 version if possible)
+  const vertSource = isWebGL2 ? `#version 300 es
+    in vec2 aPos;
+    in vec2 aTex;
+    out vec2 vTex;
+    void main() {
+      vTex = aTex;
+      gl_Position = vec4(aPos, 0, 1);
+    }
+  ` : `
+    attribute vec2 aPos;
+    attribute vec2 aTex;
+    varying vec2 vTex;
+    void main() {
+      vTex = aTex;
+      gl_Position = vec4(aPos, 0, 1);
+    }
+  `;
+
+  // Only do linear light for downsampling, not upsampling.
+  const fragSource = isWebGL2 ? `#version 300 es
+    precision highp float;
+    in vec2 vTex;
+    uniform sampler2D uTex;
+    uniform vec2 uSrcSize, uDstSize;
+    uniform bool uDown;
+    out vec4 fragColor;
+    float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
+    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
+    void main() {
+      vec2 scale = uSrcSize / uDstSize;
+      vec2 srcCoord = vTex * uDstSize * scale;
+      vec2 center = srcCoord - 0.5;
+      vec4 color = vec4(0.0);
+      float total = 0.0;
+      float r = 3.0;
+      for (int dy = -3; dy <= 3; ++dy) {
+        for (int dx = -3; dx <= 3; ++dx) {
+          vec2 offset = vec2(float(dx), float(dy));
+          vec2 sampleCoord = (center + offset + 0.5) / uSrcSize;
+          vec4 texel = texture(uTex, sampleCoord);
+          if (uDown) {
+            texel.rgb = pow(texel.rgb, vec3(2.2));
+          }
+          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
+          color += texel * weight;
+          total += weight;
+        }
+      }
+      color /= total;
+      if (uDown) {
+        color.rgb = pow(color.rgb, vec3(1.0/2.2));
+      }
+      fragColor = color;
+    }
+  ` : `
+    precision highp float;
+    varying vec2 vTex;
+    uniform sampler2D uTex;
+    uniform vec2 uSrcSize;
+    uniform vec2 uDstSize;
+    uniform bool uDown;
+    float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
+    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
+    void main() {
+      vec2 scale = uSrcSize / uDstSize;
+      vec2 srcCoord = vTex * uDstSize * scale;
+      vec2 center = srcCoord - 0.5;
+      vec4 color = vec4(0.0);
+      float total = 0.0;
+      float r = 3.0;
+      for (int dy = -3; dy <= 3; ++dy) {
+        for (int dx = -3; dx <= 3; ++dx) {
+          vec2 offset = vec2(float(dx), float(dy));
+          vec2 sampleCoord = (center + offset + 0.5) / uSrcSize;
+          vec4 texel = texture2D(uTex, sampleCoord);
+          if (uDown) {
+            texel.rgb = pow(texel.rgb, vec3(2.2));
+          }
+          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
+          color += texel * weight;
+          total += weight;
+        }
+      }
+      color /= total;
+      if (uDown) {
+        color.rgb = pow(color.rgb, vec3(1.0/2.2));
+      }
+      gl_FragColor = color;
+    }
+  `;
+
+  // --- Compile shaders and create program ---
+  function compile(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw gl.getShaderInfoLog(s);
+    }
+    return s;
+  }
+  let vs, fs, prog;
+  try {
+    vs = compile(gl, gl.VERTEX_SHADER, vertSource);
+    fs = compile(gl, gl.FRAGMENT_SHADER, fragSource);
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+  } catch (e) {
+    console.warn("[SincUpscale] Shader compile/link failed. Resorting to fallback.", img.src, e);
+    canvas.remove();
+    img.style.display = "";
+    if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {}
+    return;
+  }
+
+  // --- Set up quad: top-left is (0,0), bottom-left is (0,1), with UNPACK_FLIP_Y_WEBGL this will display upright ---
+  const posLoc = gl.getAttribLocation(prog, isWebGL2 ? 'aPos' : 'aPos');
+  const texLoc = gl.getAttribLocation(prog, isWebGL2 ? 'aTex' : 'aTex');
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  const quad = new Float32Array([
+    -1, -1, 0, 0,
+     1, -1, 1, 0,
+    -1,  1, 0, 1,
+     1,  1, 1, 1,
+  ]);
+  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(texLoc);
+  gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 16, 8);
+
+  // --- Bind src texture to unit 0 ---
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+
+  // --- Set uniforms ---
+  gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
+  gl.uniform2f(gl.getUniformLocation(prog, "uSrcSize"), img.naturalWidth, img.naturalHeight);
+  gl.uniform2f(gl.getUniformLocation(prog, "uDstSize"), width, height);
+  if (gl.getUniformLocation(prog, "uDown")) {
+    gl.uniform1i(gl.getUniformLocation(prog, "uDown"), isDownsample ? 1 : 0);
+  }
+
+  // --- Draw pass 1: Sinc/Lanczos to FBO or canvas ---
+  if (isWebGL2 && useFloatFbo) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  gl.viewport(0, 0, width, height);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // --- If using FBO, draw a fullscreen quad to canvas using passthrough shader ---
+  if (isWebGL2 && useFloatFbo) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const { vert, frag } = getPassthroughShaders(isWebGL2);
+    let vs2, fs2, prog2;
+    try {
+      vs2 = compile(gl, gl.VERTEX_SHADER, vert);
+      fs2 = compile(gl, gl.FRAGMENT_SHADER, frag);
+      prog2 = gl.createProgram();
+      gl.attachShader(prog2, vs2);
+      gl.attachShader(prog2, fs2);
+      gl.linkProgram(prog2);
+      gl.useProgram(prog2);
+    } catch (e) {
+      console.warn("[SincUpscale] Passthrough shader compile/link failed, fallback to direct rendering. Error:", e);
+      return;
+    }
+    const posLoc2 = gl.getAttribLocation(prog2, isWebGL2 ? 'aPos' : 'aPos');
+    const texLoc2 = gl.getAttribLocation(prog2, isWebGL2 ? 'aTex' : 'aTex');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(posLoc2);
+    gl.vertexAttribPointer(posLoc2, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(texLoc2);
+    gl.vertexAttribPointer(texLoc2, 2, gl.FLOAT, false, 16, 8);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, renderTex);
+    gl.uniform1i(gl.getUniformLocation(prog2, "uTex"), 0);
     gl.viewport(0, 0, width, height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
 
-    if (isWebGL2 && useFloatFbo) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      const { vert, frag } = getPassthroughShaders(isWebGL2);
-      let vs2, fs2, prog2;
-      try {
-        vs2 = compile(gl, gl.VERTEX_SHADER, vert);
-        fs2 = compile(gl, gl.FRAGMENT_SHADER, frag);
-        prog2 = gl.createProgram();
-        gl.attachShader(prog2, vs2);
-        gl.attachShader(prog2, fs2);
-        gl.linkProgram(prog2);
-        gl.useProgram(prog2);
-      } catch (e) {
-        throw "[SincUpscale] Passthrough shader compile/link failed.";
+  // Log on success
+  const scaleType = (scaleX > 1 && scaleY > 1) ? 'upscaling' :
+                    (scaleX < 1 && scaleY < 1) ? 'downscaling' : 'non-uniform scaling';
+  const backend = isWebGL2 ? (useFloatFbo ? "WebGL2+floatFBO" : "WebGL2") : "WebGL1";
+  console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
+  updateCanvasVisibility();
+}
+
+// --- Only show the topmost/foreground instance of each image src ---
+function updateCanvasVisibility() {
+  // Group canvases by src
+  const canvases = Array.from(document.querySelectorAll('canvas[data-sinc-upscaled="true"][data-src]'));
+  const bySrc = {};
+  canvases.forEach(c => {
+    const src = c.dataset.src;
+    if (!bySrc[src]) bySrc[src] = [];
+    bySrc[src].push(c);
+  });
+  for (const src in bySrc) {
+    // Find the topmost canvas in document order that is visible (not display:none, not inside a hidden overlay)
+    // Prefer a canvas inside a visible overlay/modal/lightbox if present
+    const group = bySrc[src];
+    let topCanvas = null;
+    // Find visible overlays
+    const overlays = Array.from(document.querySelectorAll('.lightbox, .media-lightbox-img, .modal, .overlay, .popup, .ipslightbox, [class*="lightbox"]')).filter(ov => ov.offsetParent !== null);
+    for (let i = group.length - 1; i >= 0; --i) {
+      const c = group[i];
+      // If in visible overlay, prefer this one
+      if (overlays.some(ov => ov.contains(c))) {
+        topCanvas = c;
+        break;
       }
-      const posLoc2 = gl.getAttribLocation(prog2, isWebGL2 ? 'aPos' : 'aPos');
-      const texLoc2 = gl.getAttribLocation(prog2, isWebGL2 ? 'aTex' : 'aTex');
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.enableVertexAttribArray(posLoc2);
-      gl.vertexAttribPointer(posLoc2, 2, gl.FLOAT, false, 16, 0);
-      gl.enableVertexAttribArray(texLoc2);
-      gl.vertexAttribPointer(texLoc2, 2, gl.FLOAT, false, 16, 8);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, renderTex);
-      gl.uniform1i(gl.getUniformLocation(prog2, "uTex"), 0);
-      gl.viewport(0, 0, width, height);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
-
-    // Only mark upscaled after success
-    img.dataset.sincUpscaled = "true";
-    const scaleType = (scaleX > 1 && scaleY > 1) ? 'upscaling' :
-                      (scaleX < 1 && scaleY < 1) ? 'downscaling' : 'non-uniform scaling';
-    const backend = isWebGL2 ? (useFloatFbo ? "WebGL2+floatFBO" : "WebGL2") : "WebGL1";
-    console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
-  } catch (e) {
-    // On any error, show original image
-    img.style.display = "";
+    if (!topCanvas) {
+      // Otherwise, use the last visible one in DOM order
+      for (let i = group.length - 1; i >= 0; --i) {
+        const c = group[i];
+        if (c.offsetParent !== null) {
+          topCanvas = c;
+          break;
+        }
+      }
+    }
+    // Hide all but topCanvas
+    group.forEach(c => {
+      c.style.display = (c === topCanvas) ? '' : 'none';
+    });
   }
 }
 
-// --- Process all <img> elements, process immediately, not throttled ---
+// --- Main processImages, only resample topmost instance per src, and only if image is ready ---
 async function processImages() {
-  for (const img of document.querySelectorAll('img')) {
-    if (
-      img.dataset.sincUpscaled === "true" ||
-      img.closest('zoomable-img') ||
-      img.closest('.modal') ||
-      img.closest('.overlay')
-    ) continue;
-    if (isSVG(img)) {
-      img.dataset.sincUpscaled = "svg";
-      continue;
-    }
-    // YouTube: Only process visible (non-placeholder) thumbnails
-    if (isYouTubeThumbnail(img) && (img.width < 30 || img.height < 30)) {
-      img.dataset.sincUpscaled = "skip";
-      continue;
-    }
-    // Set crossOrigin to anonymous if needed
-    if (
-      !img.src.startsWith("data:") &&
-      !img.src.startsWith("blob:") &&
-      !img.src.startsWith(window.location.origin) &&
-      img.crossOrigin !== "anonymous"
-    ) {
-      img.crossOrigin = "anonymous";
-      if (img.complete && img.naturalWidth) {
-        const src = img.src;
-        img.src = "";
-        img.src = src;
-        continue;
+  // For each src, only process the topmost img in DOM order that is visible & ready and not already upscaled
+  const imgs = Array.from(document.querySelectorAll('img'));
+  const bySrc = {};
+  imgs.forEach(img => {
+    const src = img.currentSrc || img.src;
+    if (!src) return;
+    if (!bySrc[src]) bySrc[src] = [];
+    bySrc[src].push(img);
+  });
+  for (const src in bySrc) {
+    // Prefer an image in a visible overlay, else the last one in document order that's visible
+    const group = bySrc[src].filter(img =>
+      !isSVG(img) &&
+      !img.dataset.sincUpscaled &&
+      isImageReady(img) &&
+      img.offsetParent !== null
+    );
+    let targetImg = null;
+    // Find overlays
+    const overlays = Array.from(document.querySelectorAll('.lightbox, .media-lightbox-img, .modal, .overlay, .popup, .ipslightbox, [class*="lightbox"]')).filter(ov => ov.offsetParent !== null);
+    for (let i = group.length - 1; i >= 0; --i) {
+      const img = group[i];
+      if (overlays.some(ov => ov.contains(img))) {
+        targetImg = img;
+        break;
       }
     }
-    if (!img.complete || !img.naturalWidth) {
-      img.addEventListener('load', processImages, {once: true});
-      continue;
+    if (!targetImg && group.length > 0) {
+      targetImg = group[group.length - 1];
     }
-    const { scaleX, scaleY, needs, width, height, style } = getScaleInfo(img);
-    if (!needs) {
-      img.dataset.sincUpscaled = "no";
-      continue;
+    if (targetImg) {
+      // Set crossOrigin if needed
+      if (
+        !targetImg.src.startsWith("data:") &&
+        !targetImg.src.startsWith("blob:") &&
+        !targetImg.src.startsWith(window.location.origin) &&
+        targetImg.crossOrigin !== "anonymous"
+      ) {
+        targetImg.crossOrigin = "anonymous";
+        if (targetImg.complete && targetImg.naturalWidth) {
+          const src = targetImg.src;
+          targetImg.src = "";
+          targetImg.src = src;
+          continue; // Will be re-processed on load
+        }
+      }
+      const { scaleX, scaleY, needs, width, height, style } = getScaleInfo(targetImg);
+      if (!needs) {
+        targetImg.dataset.sincUpscaled = "no";
+        continue;
+      }
+      targetImg.dataset.sincUpscaled = "true";
+      await replaceWithSincCanvas(targetImg, scaleX, scaleY, width, height, style);
     }
-    await replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
   }
+  updateCanvasVisibility();
 }
 
 const mo = new MutationObserver(processImages);
