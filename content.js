@@ -98,6 +98,41 @@ function copyAllComputedStyles(from, to) {
   }
 }
 
+// --- Memory cache for downloaded images ---
+const storedImages = {};
+
+async function fetchAndCacheImage(img) {
+  const url = img.src;
+  // Skip if already data/blob or same-origin, or already cached
+  if (
+    url.startsWith("data:") ||
+    url.startsWith("blob:") ||
+    url.startsWith(window.location.origin) ||
+    storedImages[url]
+  ) {
+    return;
+  }
+  try {
+    const resp = await fetch(url, {mode: "cors"});
+    if (!resp.ok) throw new Error("Image fetch failed " + resp.status);
+    const blob = await resp.blob();
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      storedImages[url] = reader.result;
+      // Set the image src to the new data URL and retry processing
+      img.src = reader.result;
+      // Mark so we don't try this again for this image
+      img.dataset.sincUpscaled_fetched = "true";
+      // Wait for image to reload, then retry
+      img.addEventListener('load', processImages, {once: true});
+    };
+    reader.readAsDataURL(blob);
+  } catch (e) {
+    console.warn('Failed to cache image:', url, e);
+    img.dataset.sincUpscaled = "failed";
+  }
+}
+
 function getPassthroughShaders(isWebGL2) {
   return {
     vert: isWebGL2 ? `#version 300 es
@@ -146,9 +181,11 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     return;
   }
   if (!isCORSsafe(img)) {
-//    console.log('[SincUpscale] Resorting to old fallback due to CORS:', img.src);
-    if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {
+    // If not already tried to fetch, do so
+    if (!img.dataset.sincUpscaled_fetched) {
+      fetchAndCacheImage(img);
     }
+    // Do not proceed until image is replaced with data URL version
     return;
   }
 
@@ -426,7 +463,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
 // --- Process all <img> elements, process immediately, not throttled ---
 function processImages() {
   for (const img of document.querySelectorAll('img')) {
-    if (img.dataset.sincUpscaled === "true") continue;
+    if (img.dataset.sincUpscaled === "true" || img.dataset.sincUpscaled === "failed") continue;
     if (isSVG(img)) {
       img.dataset.sincUpscaled = "svg";
       continue;
