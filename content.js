@@ -5,7 +5,6 @@
 const propertyName  = 'image-rendering';
 const autoValue     = 'auto';
 const propertyValue = 'pixelated';
-
 // Simple in-memory cache for data URLs (acts as "memory cache" for fetched blobs)
 const cachedDataURLs = {};
 
@@ -27,6 +26,15 @@ function isSVG(img) {
     const src = img.currentSrc || img.src || '';
     return /\.svg(\?|#|$)/i.test(src);
   } catch { return false; }
+}
+
+// YouTube thumbnail/channel icon recognizer and skip placeholder images
+function isYouTubeThumbnail(img) {
+  const src = img.currentSrc || img.src || '';
+  return (
+    /\/\/i\.ytimg\.com\/vi\//.test(src) || // video thumbnails
+    /\/\/yt3\.ggpht\.com\//.test(src)      // channel icons and avatars
+  );
 }
 
 function isInteger(number) {
@@ -138,7 +146,6 @@ function getPassthroughShaders(isWebGL2) {
     `
   };
 }
-
 // Try to set crossOrigin="anonymous" if possible, before load
 function prepareCORS(img) {
   if (
