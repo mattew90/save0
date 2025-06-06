@@ -1,4 +1,4 @@
-// --- Sinc/Lanczos Resampling Extension with robust Nearest Neighbor Integer Fallback ---
+// --- Sinc (raw, not windowed) Resampling Extension with robust Nearest Neighbor Integer Fallback ---
 // WebGL2 when available, sRGB-safe, no double-flip, and no unneeded gamma correction.
 // Images are not upside down, and colors match original unless doing linear math for downsampling!
 
@@ -171,7 +171,7 @@ function getPassthroughShaders(isWebGL2) {
   };
 }
 
-// --- Optimized Sinc/Lanczos resampling using unrolled 7x7 kernel ---
+// --- Optimized Sinc (raw, not windowed) resampling using unrolled 7x7 kernel ---
 async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style = null) {
   if (isSVG(img)) {
     return;
@@ -281,7 +281,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     }
   `;
 
-  // Only do linear light for downsampling, not upsampling.
+  // --- Raw sinc kernel, no windowing ---
   const fragSource = isWebGL2 ? `#version 300 es
     precision highp float;
     in vec2 vTex;
@@ -290,7 +290,6 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     uniform bool uDown;
     out vec4 fragColor;
     float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
-    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
     void main() {
       vec2 scale = uSrcSize / uDstSize;
       vec2 srcCoord = vTex * uDstSize * scale;
@@ -306,7 +305,9 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
           if (uDown) {
             texel.rgb = pow(texel.rgb, vec3(2.2));
           }
-          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
+          float wx = abs(float(dx)) < r ? sinc(float(dx)) : 0.0;
+          float wy = abs(float(dy)) < r ? sinc(float(dy)) : 0.0;
+          float weight = wx * wy;
           color += texel * weight;
           total += weight;
         }
@@ -325,7 +326,6 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     uniform vec2 uDstSize;
     uniform bool uDown;
     float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
-    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
     void main() {
       vec2 scale = uSrcSize / uDstSize;
       vec2 srcCoord = vTex * uDstSize * scale;
@@ -341,7 +341,9 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
           if (uDown) {
             texel.rgb = pow(texel.rgb, vec3(2.2));
           }
-          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
+          float wx = abs(float(dx)) < r ? sinc(float(dx)) : 0.0;
+          float wy = abs(float(dy)) < r ? sinc(float(dy)) : 0.0;
+          float weight = wx * wy;
           color += texel * weight;
           total += weight;
         }
@@ -411,7 +413,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     gl.uniform1i(gl.getUniformLocation(prog, "uDown"), isDownsample ? 1 : 0);
   }
 
-  // --- Draw pass 1: Sinc/Lanczos to FBO or canvas ---
+  // --- Draw pass 1: Sinc to FBO or canvas ---
   if (isWebGL2 && useFloatFbo) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   } else {
@@ -457,7 +459,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
   const scaleType = (scaleX > 1 && scaleY > 1) ? 'upscaling' :
                     (scaleX < 1 && scaleY < 1) ? 'downscaling' : 'non-uniform scaling';
   const backend = isWebGL2 ? (useFloatFbo ? "WebGL2+floatFBO" : "WebGL2") : "WebGL1";
-  console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
+  console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with raw sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
 }
 
 // --- Process all <img> elements, process immediately, not throttled ---
