@@ -1,10 +1,13 @@
-// --- Sinc (raw, not windowed) Resampling Extension with robust Nearest Neighbor Integer Fallback ---
+// --- Sinc/Lanczos Resampling Extension with robust Nearest Neighbor Integer Fallback ---
 // WebGL2 when available, sRGB-safe, no double-flip, and no unneeded gamma correction.
 // Images are not upside down, and colors match original unless doing linear math for downsampling!
 
 const propertyName  = 'image-rendering';
 const autoValue     = 'auto';
 const propertyValue = 'pixelated';
+
+// Simple in-memory cache for data URLs (acts as "memory cache" for fetched blobs)
+const cachedDataURLs = {};
 
 const renderingMap = new WeakMap();
 function saveRendering(image) {
@@ -98,41 +101,6 @@ function copyAllComputedStyles(from, to) {
   }
 }
 
-// --- Memory cache for downloaded images ---
-const storedImages = {};
-
-async function fetchAndCacheImage(img) {
-  const url = img.src;
-  // Skip if already data/blob or same-origin, or already cached
-  if (
-    url.startsWith("data:") ||
-    url.startsWith("blob:") ||
-    url.startsWith(window.location.origin) ||
-    storedImages[url]
-  ) {
-    return;
-  }
-  try {
-    const resp = await fetch(url, {mode: "cors"});
-    if (!resp.ok) throw new Error("Image fetch failed " + resp.status);
-    const blob = await resp.blob();
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      storedImages[url] = reader.result;
-      // Set the image src to the new data URL and retry processing
-      img.src = reader.result;
-      // Mark so we don't try this again for this image
-      img.dataset.sincUpscaled_fetched = "true";
-      // Wait for image to reload, then retry
-      img.addEventListener('load', processImages, {once: true});
-    };
-    reader.readAsDataURL(blob);
-  } catch (e) {
-    console.warn('Failed to cache image:', url, e);
-    img.dataset.sincUpscaled = "failed";
-  }
-}
-
 function getPassthroughShaders(isWebGL2) {
   return {
     vert: isWebGL2 ? `#version 300 es
@@ -171,7 +139,51 @@ function getPassthroughShaders(isWebGL2) {
   };
 }
 
-// --- Optimized Sinc (raw, not windowed) resampling using unrolled 7x7 kernel ---
+// Try to set crossOrigin="anonymous" if possible, before load
+function prepareCORS(img) {
+  if (
+    !img.src.startsWith("data:") &&
+    !img.src.startsWith("blob:") &&
+    !img.src.startsWith(window.location.origin) &&
+    img.crossOrigin !== "anonymous"
+  ) {
+    img.crossOrigin = "anonymous";
+    // If already loaded, force reload to apply crossOrigin
+    if (img.complete && img.naturalWidth) {
+      const src = img.src;
+      img.src = "";
+      img.src = src;
+      return true; // reloading, so skip processing now
+    }
+  }
+  return false;
+}
+
+// Fetch as blob and convert to data URL (memory cache workaround)
+async function fetchAndCacheToDataURL(img) {
+  const url = img.src;
+  if (cachedDataURLs[url]) {
+    img.src = cachedDataURLs[url];
+    return true;
+  }
+  try {
+    const resp = await fetch(url, {mode: "cors"});
+    if (!resp.ok) throw new Error("Image fetch failed " + resp.status);
+    const blob = await resp.blob();
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      cachedDataURLs[url] = reader.result;
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(blob);
+    return true;
+  } catch (e) {
+    console.warn('Failed to fetch/cors image', url, e);
+    return false;
+  }
+}
+
+// --- Optimized Sinc/Lanczos resampling using unrolled 7x7 kernel ---
 async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style = null) {
   if (isSVG(img)) {
     return;
@@ -181,11 +193,13 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     return;
   }
   if (!isCORSsafe(img)) {
-    // If not already tried to fetch, do so
-    if (!img.dataset.sincUpscaled_fetched) {
-      fetchAndCacheImage(img);
+    // Try fetch/dataURL workaround before fallback
+    const fetched = await fetchAndCacheToDataURL(img);
+    if (fetched) {
+      img.addEventListener('load', () => replaceWithSincCanvas(img, scaleX, scaleY, width, height, style), { once: true });
+    } else {
+      oldNearestNeighborFallback(img, scaleX, scaleY);
     }
-    // Do not proceed until image is replaced with data URL version
     return;
   }
 
@@ -281,7 +295,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     }
   `;
 
-  // --- Raw sinc kernel, no windowing ---
+  // Only do linear light for downsampling, not upsampling.
   const fragSource = isWebGL2 ? `#version 300 es
     precision highp float;
     in vec2 vTex;
@@ -290,6 +304,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     uniform bool uDown;
     out vec4 fragColor;
     float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
+    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
     void main() {
       vec2 scale = uSrcSize / uDstSize;
       vec2 srcCoord = vTex * uDstSize * scale;
@@ -305,9 +320,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
           if (uDown) {
             texel.rgb = pow(texel.rgb, vec3(2.2));
           }
-          float wx = abs(float(dx)) < r ? sinc(float(dx)) : 0.0;
-          float wy = abs(float(dy)) < r ? sinc(float(dy)) : 0.0;
-          float weight = wx * wy;
+          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
           color += texel * weight;
           total += weight;
         }
@@ -326,6 +339,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     uniform vec2 uDstSize;
     uniform bool uDown;
     float sinc(float x) { if (x == 0.0) return 1.0; float pix = 3.14159265359 * x; return sin(pix) / pix; }
+    float lanczos(float x, float a) { x = abs(x); if (x >= a) return 0.0; return sinc(x) * sinc(x / a); }
     void main() {
       vec2 scale = uSrcSize / uDstSize;
       vec2 srcCoord = vTex * uDstSize * scale;
@@ -341,9 +355,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
           if (uDown) {
             texel.rgb = pow(texel.rgb, vec3(2.2));
           }
-          float wx = abs(float(dx)) < r ? sinc(float(dx)) : 0.0;
-          float wy = abs(float(dy)) < r ? sinc(float(dy)) : 0.0;
-          float weight = wx * wy;
+          float weight = lanczos(float(dx), r) * lanczos(float(dy), r);
           color += texel * weight;
           total += weight;
         }
@@ -413,7 +425,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     gl.uniform1i(gl.getUniformLocation(prog, "uDown"), isDownsample ? 1 : 0);
   }
 
-  // --- Draw pass 1: Sinc to FBO or canvas ---
+  // --- Draw pass 1: Sinc/Lanczos to FBO or canvas ---
   if (isWebGL2 && useFloatFbo) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   } else {
@@ -459,17 +471,44 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
   const scaleType = (scaleX > 1 && scaleY > 1) ? 'upscaling' :
                     (scaleX < 1 && scaleY < 1) ? 'downscaling' : 'non-uniform scaling';
   const backend = isWebGL2 ? (useFloatFbo ? "WebGL2+floatFBO" : "WebGL2") : "WebGL1";
-  console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with raw sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
+  console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
 }
 
 // --- Process all <img> elements, process immediately, not throttled ---
-function processImages() {
+async function processImages() {
   for (const img of document.querySelectorAll('img')) {
-    if (img.dataset.sincUpscaled === "true" || img.dataset.sincUpscaled === "failed") continue;
+    // --- Skip overlays and already processed images ---
+    if (
+      img.dataset.sincUpscaled === "true" ||
+      img.dataset.sincUpscaled === "failed" ||
+      img.closest('zoomable-img') ||
+      img.closest('.modal') ||
+      img.closest('.overlay')
+    ) continue;
+
     if (isSVG(img)) {
       img.dataset.sincUpscaled = "svg";
       continue;
     }
+
+    // Set crossOrigin to anonymous if needed
+    if (
+      !img.src.startsWith("data:") &&
+      !img.src.startsWith("blob:") &&
+      !img.src.startsWith(window.location.origin) &&
+      img.crossOrigin !== "anonymous"
+    ) {
+      img.crossOrigin = "anonymous";
+      // If image already loaded, reload it to apply crossOrigin
+      if (img.complete && img.naturalWidth) {
+        const src = img.src;
+        img.src = "";
+        img.src = src;
+        // Will be re-processed on load
+        continue;
+      }
+    }
+
     if (!img.complete || !img.naturalWidth) {
       img.addEventListener('load', processImages, {once: true});
       continue;
@@ -480,7 +519,7 @@ function processImages() {
       continue;
     }
     img.dataset.sincUpscaled = "true";
-    replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
+    await replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
   }
 }
 
