@@ -6,9 +6,6 @@ const propertyName  = 'image-rendering';
 const autoValue     = 'auto';
 const propertyValue = 'pixelated';
 
-// Simple in-memory cache for data URLs (acts as "memory cache" for fetched blobs)
-const cachedDataURLs = {};
-
 const renderingMap = new WeakMap();
 function saveRendering(image) {
   if (!renderingMap.has(image)) {
@@ -139,27 +136,21 @@ function getPassthroughShaders(isWebGL2) {
   };
 }
 
-// Try to set crossOrigin="anonymous" if possible, before load
-function prepareCORS(img) {
+// --- YouTube-optimized image readiness check ---
+function isImageReady(img) {
+  if (!img.complete || !img.naturalWidth || !img.naturalHeight) return false;
+  if (img.naturalWidth <= 8 || img.naturalHeight <= 8) return false;
+  const style = window.getComputedStyle(img);
+  const displayedW = parseFloat(style.width), displayedH = parseFloat(style.height);
   if (
-    !img.src.startsWith("data:") &&
-    !img.src.startsWith("blob:") &&
-    !img.src.startsWith(window.location.origin) &&
-    img.crossOrigin !== "anonymous"
-  ) {
-    img.crossOrigin = "anonymous";
-    // If already loaded, force reload to apply crossOrigin
-    if (img.complete && img.naturalWidth) {
-      const src = img.src;
-      img.src = "";
-      img.src = src;
-      return true; // reloading, so skip processing now
-    }
-  }
-  return false;
+    displayedW > img.naturalWidth * 1.5 ||
+    displayedH > img.naturalHeight * 1.5
+  ) return false;
+  return true;
 }
 
-// Fetch as blob and convert to data URL (memory cache workaround)
+// --- Fetch as blob/dataURL fallback (for CORS) ---
+const cachedDataURLs = {};
 async function fetchAndCacheToDataURL(img) {
   const url = img.src;
   if (cachedDataURLs[url]) {
@@ -183,13 +174,18 @@ async function fetchAndCacheToDataURL(img) {
   }
 }
 
-// --- Optimized Sinc/Lanczos resampling using unrolled 7x7 kernel ---
+// --- Replace image with canvas, tagging with src for deduplication ---
 async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style = null) {
-  if (isSVG(img)) {
-    return;
-  }
-  if (!img.complete || !img.naturalWidth) {
+  if (isSVG(img)) return;
+  if (!isImageReady(img)) {
+    // Listen for future load or src changes
     img.addEventListener('load', () => replaceWithSincCanvas(img, scaleX, scaleY, width, height, style), { once: true });
+    new MutationObserver((mutations, obs) => {
+      if (isImageReady(img)) {
+        obs.disconnect();
+        replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
+      }
+    }).observe(img, {attributes: true, attributeFilter: ['src', 'srcset']});
     return;
   }
   if (!isCORSsafe(img)) {
@@ -213,6 +209,8 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
   copyAllComputedStyles(img, canvas);
   canvas.style.width = style.width;
   canvas.style.height = style.height;
+  canvas.dataset.sincUpscaled = "true";
+  canvas.dataset.src = img.currentSrc || img.src;
 
   img.style.display = "none";
   img.parentNode.insertBefore(canvas, img);
@@ -231,8 +229,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
       console.warn("[SincUpscale] WebGL not supported. Resorting to fallback.", img.src);
       canvas.remove();
       img.style.display = "";
-      if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {
-      }
+      if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {}
       return;
     }
   }
@@ -391,8 +388,7 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
     console.warn("[SincUpscale] Shader compile/link failed. Resorting to fallback.", img.src, e);
     canvas.remove();
     img.style.display = "";
-    if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {
-    }
+    if (!oldNearestNeighborFallback(img, scaleX, scaleY)) {}
     return;
   }
 
@@ -472,55 +468,109 @@ async function replaceWithSincCanvas(img, scaleX, scaleY, width, height, style =
                     (scaleX < 1 && scaleY < 1) ? 'downscaling' : 'non-uniform scaling';
   const backend = isWebGL2 ? (useFloatFbo ? "WebGL2+floatFBO" : "WebGL2") : "WebGL1";
   console.log(`[SincUpscale] Successfully resampled (${scaleType}) image with sinc: ${img.src} [${backend}]`, {scaleX, scaleY, width, height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight});
+  updateCanvasVisibility();
 }
 
-// --- Process all <img> elements, process immediately, not throttled ---
-async function processImages() {
-  for (const img of document.querySelectorAll('img')) {
-    // --- Skip overlays and already processed images ---
-    if (
-      img.dataset.sincUpscaled === "true" ||
-      img.dataset.sincUpscaled === "failed" ||
-      img.closest('zoomable-img') ||
-      img.closest('.modal') ||
-      img.closest('.overlay')
-    ) continue;
-
-    if (isSVG(img)) {
-      img.dataset.sincUpscaled = "svg";
-      continue;
-    }
-
-    // Set crossOrigin to anonymous if needed
-    if (
-      !img.src.startsWith("data:") &&
-      !img.src.startsWith("blob:") &&
-      !img.src.startsWith(window.location.origin) &&
-      img.crossOrigin !== "anonymous"
-    ) {
-      img.crossOrigin = "anonymous";
-      // If image already loaded, reload it to apply crossOrigin
-      if (img.complete && img.naturalWidth) {
-        const src = img.src;
-        img.src = "";
-        img.src = src;
-        // Will be re-processed on load
-        continue;
+// --- Only show the topmost/foreground instance of each image src ---
+function updateCanvasVisibility() {
+  // Group canvases by src
+  const canvases = Array.from(document.querySelectorAll('canvas[data-sinc-upscaled="true"][data-src]'));
+  const bySrc = {};
+  canvases.forEach(c => {
+    const src = c.dataset.src;
+    if (!bySrc[src]) bySrc[src] = [];
+    bySrc[src].push(c);
+  });
+  for (const src in bySrc) {
+    // Find the topmost canvas in document order that is visible (not display:none, not inside a hidden overlay)
+    // Prefer a canvas inside a visible overlay/modal/lightbox if present
+    const group = bySrc[src];
+    let topCanvas = null;
+    // Find visible overlays
+    const overlays = Array.from(document.querySelectorAll('.lightbox, .media-lightbox-img, .modal, .overlay, .popup, .ipslightbox, [class*="lightbox"]')).filter(ov => ov.offsetParent !== null);
+    for (let i = group.length - 1; i >= 0; --i) {
+      const c = group[i];
+      // If in visible overlay, prefer this one
+      if (overlays.some(ov => ov.contains(c))) {
+        topCanvas = c;
+        break;
       }
     }
-
-    if (!img.complete || !img.naturalWidth) {
-      img.addEventListener('load', processImages, {once: true});
-      continue;
+    if (!topCanvas) {
+      // Otherwise, use the last visible one in DOM order
+      for (let i = group.length - 1; i >= 0; --i) {
+        const c = group[i];
+        if (c.offsetParent !== null) {
+          topCanvas = c;
+          break;
+        }
+      }
     }
-    const { scaleX, scaleY, needs, width, height, style } = getScaleInfo(img);
-    if (!needs) {
-      img.dataset.sincUpscaled = "no";
-      continue;
-    }
-    img.dataset.sincUpscaled = "true";
-    await replaceWithSincCanvas(img, scaleX, scaleY, width, height, style);
+    // Hide all but topCanvas
+    group.forEach(c => {
+      c.style.display = (c === topCanvas) ? '' : 'none';
+    });
   }
+}
+
+// --- Main processImages, only resample topmost instance per src, and only if image is ready ---
+async function processImages() {
+  // For each src, only process the topmost img in DOM order that is visible & ready and not already upscaled
+  const imgs = Array.from(document.querySelectorAll('img'));
+  const bySrc = {};
+  imgs.forEach(img => {
+    const src = img.currentSrc || img.src;
+    if (!src) return;
+    if (!bySrc[src]) bySrc[src] = [];
+    bySrc[src].push(img);
+  });
+  for (const src in bySrc) {
+    // Prefer an image in a visible overlay, else the last one in document order that's visible
+    const group = bySrc[src].filter(img =>
+      !isSVG(img) &&
+      !img.dataset.sincUpscaled &&
+      isImageReady(img) &&
+      img.offsetParent !== null
+    );
+    let targetImg = null;
+    // Find overlays
+    const overlays = Array.from(document.querySelectorAll('.lightbox, .media-lightbox-img, .modal, .overlay, .popup, .ipslightbox, [class*="lightbox"]')).filter(ov => ov.offsetParent !== null);
+    for (let i = group.length - 1; i >= 0; --i) {
+      const img = group[i];
+      if (overlays.some(ov => ov.contains(img))) {
+        targetImg = img;
+        break;
+      }
+    }
+    if (!targetImg && group.length > 0) {
+      targetImg = group[group.length - 1];
+    }
+    if (targetImg) {
+      // Set crossOrigin if needed
+      if (
+        !targetImg.src.startsWith("data:") &&
+        !targetImg.src.startsWith("blob:") &&
+        !targetImg.src.startsWith(window.location.origin) &&
+        targetImg.crossOrigin !== "anonymous"
+      ) {
+        targetImg.crossOrigin = "anonymous";
+        if (targetImg.complete && targetImg.naturalWidth) {
+          const src = targetImg.src;
+          targetImg.src = "";
+          targetImg.src = src;
+          continue; // Will be re-processed on load
+        }
+      }
+      const { scaleX, scaleY, needs, width, height, style } = getScaleInfo(targetImg);
+      if (!needs) {
+        targetImg.dataset.sincUpscaled = "no";
+        continue;
+      }
+      targetImg.dataset.sincUpscaled = "true";
+      await replaceWithSincCanvas(targetImg, scaleX, scaleY, width, height, style);
+    }
+  }
+  updateCanvasVisibility();
 }
 
 const mo = new MutationObserver(processImages);
